@@ -10,7 +10,7 @@ from urllib.parse import quote
 import re
 from typing import Optional, Tuple
 
-# Optional import for Pyrogram (user session fetcher)
+# Optional import for Pyrogram (bot mode fetcher)
 try:
     from pyrogram import Client as PyroClient
     from pyrogram.errors import RPCError
@@ -22,10 +22,9 @@ except Exception:  # pragma: no cover
 BOT_TOKEN = "7996057828:AAGpzZPMVVUs7qSqyZcwOY4Etn7xtbffNuE"
 API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-# Optional user session configuration (for fetching channel media by link)
+# Optional Pyrogram bot-mode configuration (no phone number needed)
 TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID")
 TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
-TELEGRAM_SESSION_STRING = os.getenv("TELEGRAM_SESSION_STRING")
 
 class TelegramBot:
     def __init__(self, token):
@@ -279,32 +278,32 @@ class YouTubeDownloader:
         await process.communicate()
 
 class TelegramMediaFetcher:
-    """Fetch Telegram channel/group post media via Pyrogram user session.
-    Requires TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_SESSION_STRING.
+    """Fetch Telegram channel/group post media via Pyrogram using bot mode.
+    Requires TELEGRAM_API_ID and TELEGRAM_API_HASH and uses BOT_TOKEN (no login needed).
+    Bot must have access to the target chat to fetch.
     """
 
-    def __init__(self, api_id: Optional[int], api_hash: Optional[str], session_string: Optional[str]):
+    def __init__(self, api_id: Optional[int], api_hash: Optional[str], bot_token: Optional[str]):
         self.api_id = int(api_id) if api_id else None
         self.api_hash = api_hash
-        self.session_string = session_string
+        self.bot_token = bot_token
         self.client: Optional[PyroClient] = None
         self._started = False
 
     def is_configured(self) -> bool:
-        return bool(PyroClient and self.api_id and self.api_hash and self.session_string)
+        return bool(PyroClient and self.api_id and self.api_hash and self.bot_token)
 
     async def ensure_started(self):
         if not self.is_configured() or self._started:
             return
-        # Create a client from session string (no interactive login)
-        self.client = PyroClient(name="media_fetcher", api_id=self.api_id, api_hash=self.api_hash, session_string=self.session_string, no_updates=True, in_memory=True)
+        # Create a client in bot mode (no interactive login)
+        self.client = PyroClient(name="media_fetcher_bot", api_id=self.api_id, api_hash=self.api_hash, bot_token=self.bot_token, no_updates=True, in_memory=True)
         await self.client.start()
         self._started = True
 
     @staticmethod
     def parse_tme_link(link: str) -> Optional[Tuple[str, int]]:
         """Return (chat_ref, message_id). chat_ref can be username or numeric chat id string."""
-        # Normalize
         link = link.strip()
         if link.startswith("t.me/"):
             link = "https://" + link
@@ -315,14 +314,12 @@ class TelegramMediaFetcher:
         chat_part = m.group(2)
         msg_id = int(m.group(3))
         if is_c:
-            # t.me/c/<internal_id>/<msg_id> -> chat_id = -100<internal_id>
-            try:
-                internal_id = int(chat_part)
-                chat_ref = str(-100 * internal_id)
-            except ValueError:
+            # t.me/c/<id_without_-100>/<msg_id> -> chat_id = -100<id_without_-100>
+            if not chat_part.isdigit():
                 return None
+            chat_ref = f"-100{chat_part}"
         else:
-            chat_ref = chat_part  # username or invite link code (invite links not supported here)
+            chat_ref = chat_part
         return chat_ref, msg_id
 
     async def fetch_to_temp(self, link: str, temp_dir: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
@@ -335,29 +332,20 @@ class TelegramMediaFetcher:
             return None, None, None
         chat_ref, msg_id = parsed
         try:
-            # Resolve chat
-            if chat_ref.startswith("-"):
-                chat_id = int(chat_ref)
-            else:
-                chat_id = chat_ref
+            # Resolve chat (username or -100... id)
+            chat_id = int(chat_ref) if chat_ref.startswith("-") else chat_ref
             msg = await self.client.get_messages(chat_id, msg_id)
             if not msg:
                 return None, None, None
             caption = msg.caption or (msg.text if getattr(msg, 'text', None) else None)
-            media_path = None
             media_type = None
-            target = None
             if msg.document:
-                target = msg.document
                 media_type = 'document'
             elif msg.video:
-                target = msg.video
                 media_type = 'video'
             elif msg.photo:
-                target = msg.photo
                 media_type = 'photo'
             elif msg.audio:
-                target = msg.audio
                 media_type = 'audio'
             else:
                 return None, None, None
@@ -368,7 +356,7 @@ class TelegramMediaFetcher:
 
 async def send_command_suggestions(bot, chat_id):
     """Send command suggestions"""
-    suggestions_text = "🎵 Kirim URL YouTube atau nama lagu untuk download audio\n\nContoh:\n/yt https://youtube.com/watch?v=...\n/yt cukup\n/yt dewa 19 risalah hati\n\n🔗 Kirim tautan t.me/<channel>/<id> untuk mencoba fetch media (butuh konfigurasi user session)."
+    suggestions_text = "🎵 Kirim URL YouTube atau nama lagu untuk download audio\n\nContoh:\n/yt https://youtube.com/watch?v=...\n/yt cukup\n/yt dewa 19 risalah hati\n\n🔗 Kirim tautan t.me/<channel>/<id> untuk mencoba fetch media (bot harus punya akses ke channel)."
     
     # Create custom keyboard with command suggestion
     keyboard = {
@@ -457,7 +445,7 @@ async def handle_youtube_download(bot, chat_id, query):
             pass
 
 async def handle_tme_link(bot: TelegramBot, media_fetcher: Optional[TelegramMediaFetcher], chat_id: int, link: str):
-    """Handle fetching media from a t.me/<channel>/<message_id> link using user session if configured."""
+    """Handle fetching media from a t.me/<channel>/<message_id> link using Pyrogram bot-mode client."""
     # Send processing message
     processing_data = {
         'chat_id': chat_id,
@@ -469,15 +457,15 @@ async def handle_tme_link(bot: TelegramBot, media_fetcher: Optional[TelegramMedi
 
     if media_fetcher is None or not media_fetcher.is_configured():
         await bot.edit_message_text(chat_id, processing_msg_id,
-                                    "❌ Fitur fetch dari tautan t.me memerlukan konfigurasi user session.\n\n"
-                                    "Set environment variable: TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_SESSION_STRING.")
+                                    "❌ Fitur fetch t.me memerlukan TELEGRAM_API_ID & TELEGRAM_API_HASH (mode bot).\n"
+                                    "Tambahkan bot ke channel agar punya akses.")
         return
 
     temp_dir = tempfile.mkdtemp()
     try:
         file_path, media_type, caption = await media_fetcher.fetch_to_temp(link, temp_dir)
         if not file_path or not os.path.exists(file_path) or not media_type:
-            await bot.edit_message_text(chat_id, processing_msg_id, "❌ Gagal mengambil media. Pastikan akun memiliki akses ke channel/post tersebut.")
+            await bot.edit_message_text(chat_id, processing_msg_id, "❌ Gagal mengambil media. Bot tidak memiliki akses atau pesan tidak berisi media.")
             return
         # Size check similar to audio handler
         file_size = os.path.getsize(file_path)
@@ -490,7 +478,6 @@ async def handle_tme_link(bot: TelegramBot, media_fetcher: Optional[TelegramMedi
         elif media_type == 'photo':
             await bot.send_photo(chat_id, file_path, caption=caption)
         elif media_type == 'audio':
-            # Use sendDocument for generic audio to preserve original
             await bot.send_document(chat_id, file_path, caption=caption or "Audio")
         else:
             await bot.send_document(chat_id, file_path, caption=caption)
@@ -584,22 +571,21 @@ async def main():
     print("🤖 Bot Telegram YouTube MP3 Downloader dimulai...")
     print("Tekan Ctrl+C untuk menghentikan bot.")
     
-    # Prepare optional media fetcher
+    # Prepare optional media fetcher (bot-mode)
     media_fetcher: Optional[TelegramMediaFetcher] = None
-    if TELEGRAM_API_ID and TELEGRAM_API_HASH and TELEGRAM_SESSION_STRING:
+    if TELEGRAM_API_ID and TELEGRAM_API_HASH:
         if PyroClient is None:
             print("ℹ️ Pyrogram belum terpasang. Fitur fetch t.me tidak aktif.")
         else:
-            media_fetcher = TelegramMediaFetcher(TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_SESSION_STRING)
+            media_fetcher = TelegramMediaFetcher(TELEGRAM_API_ID, TELEGRAM_API_HASH, BOT_TOKEN)
             try:
-                # Start lazily later in handler; but ensure config is valid
                 await media_fetcher.ensure_started()
-                print("✅ Fitur fetch t.me aktif (user session siap).")
+                print("✅ Fitur fetch t.me aktif (bot mode).")
             except Exception as e:
-                print(f"⚠️ Gagal inisialisasi user session: {e}. Fitur fetch t.me dimatikan.")
+                print(f"⚠️ Gagal inisialisasi Pyrogram bot: {e}. Fitur fetch t.me dimatikan.")
                 media_fetcher = None
     else:
-        print("ℹ️ TELEGRAM_API_ID/HASH/SESSION_STRING tidak ditemukan. Fitur fetch t.me nonaktif.")
+        print("ℹ️ TELEGRAM_API_ID/HASH tidak ditemukan. Fitur fetch t.me nonaktif.")
     
     async with TelegramBot(BOT_TOKEN) as bot:
         # Setup bot commands for suggestions menu
