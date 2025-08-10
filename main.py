@@ -6,11 +6,119 @@ import shutil
 import aiohttp
 import json
 import yt_dlp
+import re
 from urllib.parse import quote
+from telethon import TelegramClient
+from telethon.tl.types import MessageMediaDocument, MessageMediaPhoto, MessageMediaWebPage
 
-# Bot token dari BotFather
-BOT_TOKEN = "7996057828:AAGpzZPMVVUs7qSqyZcwOY4Etn7xtbffNuE"
+# Bot version
+BOT_VERSION = "1.0.0"
+
+# Import config if available
+try:
+    from config import BOT_TOKEN, API_ID, API_HASH
+except ImportError:
+    # Fallback to hardcoded values (replace with your credentials)
+    BOT_TOKEN = "7996057828:AAGpzZPMVVUs7qSqyZcwOY4Etn7xtbffNuE"
+    API_ID = "YOUR_API_ID"  # Ganti dengan API ID Anda
+    API_HASH = "YOUR_API_HASH"  # Ganti dengan API Hash Anda
+
 API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
+
+class TelegramChannelFetcher:
+    def __init__(self, api_id, api_hash):
+        # Convert API_ID to int if it's a string
+        self.api_id = int(api_id) if isinstance(api_id, str) else api_id
+        self.api_hash = api_hash
+        self.client = None
+    
+    async def __aenter__(self):
+        self.client = TelegramClient('bot_session', self.api_id, self.api_hash)
+        await self.client.start()
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self.client:
+            await self.client.disconnect()
+    
+    def parse_telegram_link(self, link):
+        """Parse Telegram link to extract channel and message ID"""
+        # Pattern untuk link seperti: https://t.me/BIOSKOP_FILM_HOROR_INDONESIAAA/3986
+        pattern = r'https://t\.me/([^/]+)/(\d+)'
+        match = re.match(pattern, link)
+        
+        if match:
+            channel_username = match.group(1)
+            message_id = int(match.group(2))
+            return channel_username, message_id
+        return None, None
+    
+    async def fetch_message(self, link):
+        """Fetch message from Telegram link"""
+        try:
+            channel_username, message_id = self.parse_telegram_link(link)
+            
+            if not channel_username or not message_id:
+                return None, "❌ Format link tidak valid. Gunakan format: https://t.me/channel_name/message_id"
+            
+            # Get the message
+            message = await self.client.get_messages(channel_username, ids=message_id)
+            
+            if not message:
+                return None, "❌ Pesan tidak ditemukan atau channel bersifat private."
+            
+            return message, None
+            
+        except Exception as e:
+            return None, f"❌ Error saat mengambil pesan: {str(e)}"
+    
+    async def download_media(self, message, output_dir):
+        """Download media from message"""
+        try:
+            if not message.media:
+                return None, "❌ Pesan tidak mengandung media."
+            
+            # Download media
+            file_path = await self.client.download_media(
+                message.media,
+                file=output_dir
+            )
+            
+            if not file_path:
+                return None, "❌ Gagal mendownload media."
+            
+            return file_path, None
+            
+        except Exception as e:
+            return None, f"❌ Error saat mendownload media: {str(e)}"
+    
+    def get_media_info(self, message):
+        """Get information about the media"""
+        if not message.media:
+            return None
+        
+        media_type = "Unknown"
+        file_size = 0
+        file_name = "file"
+        
+        if isinstance(message.media, MessageMediaDocument):
+            media_type = "Document"
+            if message.media.document:
+                file_size = message.media.document.size
+                for attr in message.media.document.attributes:
+                    if hasattr(attr, 'file_name') and attr.file_name:
+                        file_name = attr.file_name
+                        break
+        elif isinstance(message.media, MessageMediaPhoto):
+            media_type = "Photo"
+            if message.media.photo:
+                file_size = message.media.photo.size
+        
+        return {
+            'type': media_type,
+            'size': file_size,
+            'name': file_name
+        }
 
 class TelegramBot:
     def __init__(self, token):
@@ -59,6 +167,57 @@ class TelegramBot:
             data.add_field('thumb', thumb_data, filename=os.path.basename(thumbnail_path))
         
         async with self.session.post(f"{self.api_url}/sendAudio", data=data) as response:
+            return await response.json()
+    
+    async def send_document(self, chat_id, file_path, caption=None):
+        """Send document/file to chat"""
+        data = aiohttp.FormData()
+        data.add_field('chat_id', str(chat_id))
+        
+        if caption:
+            data.add_field('caption', caption)
+        
+        # Read file
+        with open(file_path, 'rb') as file:
+            file_data = file.read()
+        
+        data.add_field('document', file_data, filename=os.path.basename(file_path))
+        
+        async with self.session.post(f"{self.api_url}/sendDocument", data=data) as response:
+            return await response.json()
+    
+    async def send_video(self, chat_id, video_file_path, caption=None):
+        """Send video to chat"""
+        data = aiohttp.FormData()
+        data.add_field('chat_id', str(chat_id))
+        
+        if caption:
+            data.add_field('caption', caption)
+        
+        # Read video file
+        with open(video_file_path, 'rb') as video_file:
+            video_data = video_file.read()
+        
+        data.add_field('video', video_data, filename=os.path.basename(video_file_path))
+        
+        async with self.session.post(f"{self.api_url}/sendVideo", data=data) as response:
+            return await response.json()
+    
+    async def send_photo(self, chat_id, photo_file_path, caption=None):
+        """Send photo to chat"""
+        data = aiohttp.FormData()
+        data.add_field('chat_id', str(chat_id))
+        
+        if caption:
+            data.add_field('caption', caption)
+        
+        # Read photo file
+        with open(photo_file_path, 'rb') as photo_file:
+            photo_data = photo_file.read()
+        
+        data.add_field('photo', photo_data, filename=os.path.basename(photo_file_path))
+        
+        async with self.session.post(f"{self.api_url}/sendPhoto", data=data) as response:
             return await response.json()
     
     async def get_chat_member(self, chat_id, user_id):
@@ -235,16 +394,34 @@ class YouTubeDownloader:
 
 async def send_command_suggestions(bot, chat_id):
     """Send command suggestions"""
-    suggestions_text = "🎵 Kirim URL YouTube atau nama lagu untuk download audio\n\nContoh:\n/yt https://youtube.com/watch?v=...\n/yt cukup\n/yt dewa 19 risalah hati"
+    suggestions_text = f"""🎵 Bot Telegram Media Downloader v{BOT_VERSION}
+
+📥 **Fitur yang tersedia:**
+• YouTube Audio Download: `/yt [URL atau nama lagu]`
+• Telegram Media Fetch: `/tg [link Telegram]`
+
+📋 **Contoh penggunaan:**
+• `/yt https://youtube.com/watch?v=...`
+• `/yt cukup`
+• `/tg https://t.me/channel_name/123`
+
+💡 **Tips:**
+• Untuk YouTube: Bisa URL atau nama lagu
+• Untuk Telegram: Hanya link yang bisa di-copy (tidak bisa di-forward)
+
+🔧 **Commands:**
+• `/start` atau `/help` - Tampilkan menu ini
+• `/yt [query]` - Download audio dari YouTube
+• `/tg [link]` - Fetch media dari Telegram"""
     
-    # Create custom keyboard with command suggestion
+    # Create custom keyboard with command suggestions
     keyboard = {
         "keyboard": [
-            [{"text": "/yt "}]
+            [{"text": "/yt "}, {"text": "/tg "}]
         ],
         "resize_keyboard": True,
         "one_time_keyboard": False,
-        "input_field_placeholder": "YouTube URL atau nama lagu..."
+        "input_field_placeholder": "YouTube URL/lagu atau Telegram link..."
     }
     
     data = {
@@ -323,6 +500,91 @@ async def handle_youtube_download(bot, chat_id, query):
         except:
             pass
 
+async def handle_telegram_fetch(bot, chat_id, link):
+    """Handle Telegram link fetch and download"""
+    # Check if API credentials are set
+    if API_ID == "YOUR_API_ID" or API_HASH == "YOUR_API_HASH":
+        await bot.send_message(chat_id, "❌ API ID dan API Hash belum dikonfigurasi!\n\nSilakan set API_ID dan API_HASH di file main.py")
+        return
+    
+    processing_msg = "🔄 Memproses link Telegram... Mohon tunggu sebentar."
+    
+    # Send processing message
+    processing_data = {
+        'chat_id': chat_id,
+        'text': processing_msg
+    }
+    
+    async with bot.session.post(f"{bot.api_url}/sendMessage", data=processing_data) as response:
+        processing_response = await response.json()
+    
+    processing_msg_id = processing_response['result']['message_id']
+    
+    # Create temporary directory
+    temp_dir = tempfile.mkdtemp()
+    
+    try:
+        # Convert API_ID to int if needed
+        api_id = int(API_ID) if isinstance(API_ID, str) else API_ID
+        async with TelegramChannelFetcher(api_id, API_HASH) as fetcher:
+            # Fetch message from link
+            await bot.edit_message_text(chat_id, processing_msg_id, "📡 Mengambil pesan dari channel...")
+            
+            message, error = await fetcher.fetch_message(link)
+            
+            if error:
+                await bot.edit_message_text(chat_id, processing_msg_id, error)
+                return
+            
+            # Get media info
+            media_info = fetcher.get_media_info(message)
+            
+            if not media_info:
+                await bot.edit_message_text(chat_id, processing_msg_id, "❌ Pesan tidak mengandung media yang dapat didownload.")
+                return
+            
+            # Check file size (Telegram limit: 50MB)
+            if media_info['size'] > 50 * 1024 * 1024:
+                await bot.edit_message_text(chat_id, processing_msg_id, "❌ File terlalu besar! Maksimal 50MB.")
+                return
+            
+            # Download media
+            await bot.edit_message_text(chat_id, processing_msg_id, "📥 Mendownload media...")
+            
+            file_path, error = await fetcher.download_media(message, temp_dir)
+            
+            if error:
+                await bot.edit_message_text(chat_id, processing_msg_id, error)
+                return
+            
+            # Send media based on type
+            await bot.edit_message_text(chat_id, processing_msg_id, "📤 Mengirim file...")
+            
+            caption = f"📁 {media_info['name']}\n📊 Ukuran: {media_info['size'] / (1024*1024):.2f} MB"
+            
+            if media_info['type'] == 'Photo':
+                await bot.send_photo(chat_id, file_path, caption=caption)
+            elif media_info['type'] == 'Document':
+                await bot.send_document(chat_id, file_path, caption=caption)
+            else:
+                # Try to determine if it's video based on extension
+                if file_path.lower().endswith(('.mp4', '.avi', '.mov', '.mkv', '.webm')):
+                    await bot.send_video(chat_id, file_path, caption=caption)
+                else:
+                    await bot.send_document(chat_id, file_path, caption=caption)
+            
+            await bot.delete_message(chat_id, processing_msg_id)
+    
+    except Exception as e:
+        await bot.edit_message_text(chat_id, processing_msg_id, f"❌ Terjadi error: {str(e)}")
+    
+    finally:
+        # Clean up temporary directory
+        try:
+            shutil.rmtree(temp_dir)
+        except:
+            pass
+
 async def process_update(bot, update):
     """Process incoming update"""
     # Handle both messages and channel posts
@@ -386,6 +648,31 @@ async def process_update(bot, update):
             except:
                 pass  # Ignore if can't delete
             await send_command_suggestions(bot, chat_id)
+    elif text.startswith('/tg ') or text.startswith('/tg@'):
+        # Extract link, handling both /tg and /tg@botusername formats
+        if text.startswith('/tg@'):
+            parts = text.split(' ', 1)
+            link = parts[1].strip() if len(parts) > 1 else ""
+        else:
+            link = text[4:].strip()
+        
+        if link:
+            # Auto-delete user command for all chat types
+            try:
+                await asyncio.sleep(1)
+                await bot.delete_message(chat_id, message_id)
+            except:
+                pass  # Ignore if can't delete (e.g., no admin rights)
+            
+            await handle_telegram_fetch(bot, chat_id, link)
+        else:
+            # Auto-delete invalid command for all chat types
+            try:
+                await asyncio.sleep(1)
+                await bot.delete_message(chat_id, message_id)
+            except:
+                pass  # Ignore if can't delete
+            await send_command_suggestions(bot, chat_id)
 
 async def main():
     """Start the bot"""
@@ -394,7 +681,7 @@ async def main():
         print("Silakan set environment variable TELEGRAM_BOT_TOKEN dengan token bot Anda.")
         return
     
-    print("🤖 Bot Telegram YouTube MP3 Downloader dimulai...")
+    print(f"🤖 Bot Telegram Media Downloader v{BOT_VERSION} dimulai...")
     print("Tekan Ctrl+C untuk menghentikan bot.")
     
     async with TelegramBot(BOT_TOKEN) as bot:
@@ -403,6 +690,10 @@ async def main():
             {
                 "command": "yt",
                 "description": "Download audio dari YouTube - /yt [URL atau nama lagu]"
+            },
+            {
+                "command": "tg",
+                "description": "Fetch media dari Telegram - /tg [link Telegram]"
             }
         ]
         await bot.set_my_commands(commands)

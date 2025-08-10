@@ -1,0 +1,3 @@
+aiohttp==3.9.1
+yt-dlp==2023.12.30
+telethon==1.34.0
